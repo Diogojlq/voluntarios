@@ -9,10 +9,11 @@ from django.utils.safestring import mark_safe
 from django.utils.functional import lazy
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from notification.utils import notify_support
 
-from vol.models import AreaTrabalho, AreaAtuacaoHierarquica, Voluntario, Entidade, UFS_SIGLA, AreaInteresse, Telefone, TIPO_TEL, Email, TipoArtigo, TermoAdesao, TIPO_DOC_IDENTIF, ESTADO_CIVIL, Estado, Cidade, ProcessoSeletivo, MODO_TRABALHO
+from vol.models import AreaTrabalho, AreaAtuacaoHierarquica, Voluntario, Entidade, UFS_SIGLA, AreaInteresse, Telefone, TIPO_TEL, Email, TipoArtigo, TermoAdesao, TIPO_DOC_IDENTIF, ESTADO_CIVIL, Estado, Cidade, ProcessoSeletivo, MODO_TRABALHO, AreaTrabalhoEmProcessoSeletivo
 
 def _limpa_cpf(val, obrigatorio=False):
     if (val is None or len(val) == 0) and obrigatorio:
@@ -385,7 +386,8 @@ class FormAreaInteresse(forms.ModelForm):
                                           empty_label=u'-- Escolha uma opção --',
                                           queryset=AreaAtuacaoHierarquica.objects.all().order_by('indice'),
                                           widget=forms.Select(attrs={'class': 'form-control combo-area-interesse'}),
-                                          help_text="")
+                                          help_text="",
+                                          required=False)
 
     class Meta:
         model = AreaInteresse
@@ -696,10 +698,30 @@ class FormAssinarTermoAdesaoVol(forms.Form):
                 u'Para submeter é preciso marcar a opção de aceitação do termo no final do formulário')
         return aceitou
 
+class FormAreaTrabalho(forms.ModelForm):
+    "Formulário de áreas de trabalho de voluntários para processo seletivo"
+    area_trabalho = forms.ModelChoiceField(label='Área de trabalho do voluntário',
+                                           empty_label=u'-- Escolha uma opção --',
+                                           queryset=AreaTrabalho.objects.all().order_by('nome'),
+                                           widget=forms.Select(attrs={'class': 'form-control combo-area-trabalho'}),
+                                           help_text="",
+                                           required=False) # deve ser falso para evitar problema com combo extra
+
+    class Meta:
+        model = AreaTrabalhoEmProcessoSeletivo
+        fields = ("area_trabalho",)
+
+    def disable(self):
+        for field_name, field in self.fields.items():
+            field.widget.attrs['disabled'] = 'disabled'
+
 class FormProcessoSeletivo(forms.ModelForm):
+
     class Meta:
         model = ProcessoSeletivo
-        fields = '__all__'
+        fields = ('titulo', 'resumo_entidade', 'modo_trabalho', 'estado', 'cidade',
+                  'atividades', 'requisitos', 'carga_horaria', 'inicio_inscricoes',
+                  'limite_inscricoes', 'previsao_resultado',)
 
     titulo = forms.CharField(label=u'Título da vaga',
                              max_length=100,
@@ -717,7 +739,8 @@ class FormProcessoSeletivo(forms.ModelForm):
     cidade = forms.ChoiceField(label=u'Cidade',
                                widget=forms.Select(attrs={'class': 'form-control'}),
                                choices=[], # definido via init para validação. No form é carregado via ajax.
-                               required=False)
+                               required=False,
+                               initial='')
     atividades = forms.CharField(label='Atividades a serem realizadas',
                                  widget=forms.Textarea(attrs={'class': 'form-control', 'rows': 2, 'cols': 30}))
     requisitos = forms.CharField(label='Pré-requisitos',
@@ -725,7 +748,7 @@ class FormProcessoSeletivo(forms.ModelForm):
                                  required=False)
     carga_horaria = forms.CharField(label='Dias e horários de execução das atividades',
                                     widget=forms.Textarea(attrs={'class': 'form-control', 'rows': 1, 'cols': 30}))
-    inicio_inscricoes = forms.DateTimeField(label=u'Início',
+    inicio_inscricoes = forms.DateTimeField(label=u'Início das inscrições',
                                   initial=date.today,
                                   widget=forms.SelectDateWidget(
                                       years=[y for y in range(date.today().year, date.today().year + 10)],
@@ -741,16 +764,125 @@ class FormProcessoSeletivo(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
 
+        # Parâmetro customizado
+        disabled = False
+        if 'disabled' in kwargs:
+            disabled = kwargs['disabled']
+            # precisa ser removido antes do super para evitar erro
+            del kwargs['disabled']
+
         super(FormProcessoSeletivo, self).__init__(*args, **kwargs)
 
         estado = self.data.get('estado')
-        if estado is None and self.instance:
-            estado = self.instance.estado
+        if estado is None and self.instance and self.instance.estado:
+            estado = self.instance.estado.sigla
+            self.initial['estado'] = estado
 
         if estado:
             # Atualiza opções válidas de cidades de acordo com o estado
             cidades = Cidade.objects.filter(uf=estado).order_by('nome')
             self.fields['cidade'] = forms.ChoiceField(label=u'Cidade',
                                                       widget=forms.Select(attrs={'class': 'form-control'}),
-                                                      choices=[(c.nome, c.nome) for c in cidades])
+                                                      choices=[(c.nome, c.nome) for c in cidades],
+                                                      initial='')
 
+        # Exibe campos desabilitados a depender do status
+        if disabled or (self.instance and not self.instance.editavel()):
+            for field_name, field in self.fields.items():
+                if field_name == 'inicio_inscricoes':
+                    # Permite edição de início das inscrições caso o processo ainda esteja aguardando publicação
+                    if not self.instance.passivel_de_antecipar_inscricoes():
+                        # se utilizarmos readonly, combos continuam podendo ser alterados
+                        field.widget.attrs['disabled'] = 'disabled'
+                elif field_name in ('limite_inscricoes', 'previsao_resultado'):
+                    # Permite edição de data limite e previsão de resultado quando o processo se encontra
+                    # aberto a inscrições ou mesmo aguardando seleção
+                    if not self.instance.passivel_de_estender_inscricoes():
+                        # se utilizarmos readonly, combos continuam podendo ser alterados
+                        field.widget.attrs['disabled'] = 'disabled'
+                else:
+                    # se utilizarmos readonly, combos continuam podendo ser alterados
+                    field.widget.attrs['disabled'] = 'disabled'
+
+    def clean_estado(self):
+        # Como o campo estado não é um ModelChoiceField, transforma a sigla do estado numa instância de Estado
+        val = self.cleaned_data['estado']
+        if isinstance(val, str):
+            try:
+                val = Estado.objects.get(sigla=val)
+            except Estado.DoesNotExist:
+                raise forms.ValidationError(u'Escolha um estado da lista')
+        return val
+
+    def clean_cidade(self):
+        # Como o campo cidade não é um ModelChoiceField, transforma o nome da cidade numa instância de Cidade
+        val = self.cleaned_data['cidade']
+        estado = self.clean_estado()
+        if isinstance(val, str):
+            try:
+                val = Cidade.objects.get(uf=estado, nome=val)
+            except Cidade.DoesNotExist:
+                raise forms.ValidationError(u'Escolha uma cidade da lista')
+        return val
+
+    def clean_inicio_inscricoes(self):
+        # Garante que a data não esteja no passado em caso de antecipação de inscrições
+        val = self.cleaned_data['inicio_inscricoes']
+        if self.instance and self.instance.pk and self.instance.passivel_de_antecipar_inscricoes():
+            current_tz = timezone.get_current_timezone()
+            now = timezone.now().astimezone(current_tz)
+            # obs: um processo pode estar aguardando publicação já com a data de início no passado, caso
+            # a aprovação do processo tenha demorado ou caso a própria entidade tenha demorado para solicitar
+            # aprovação, portanto a validação abaixo só deve ser feita em caso de antecipação de início de
+            # inscrições quando a data de início a ser alterada estiver no futuro
+            if val and self.instance.inicio_inscricoes > now and val < now:
+                raise forms.ValidationError(u'A data de início das inscrições deve ser maior ou igual a data de hoje')
+        return val
+
+    def clean_limite_inscricoes(self):
+        # Garante que o limite, quando definido, seja sempre maior ou igual ao início
+        val = self.cleaned_data['limite_inscricoes']
+        if val:
+            inicio_inscricoes = self.cleaned_data.get('inicio_inscricoes', None)
+            if inicio_inscricoes is None:
+                inicio_inscricoes = self.instance.inicio_inscricoes
+
+            if val < inicio_inscricoes:
+                raise forms.ValidationError(u'A data limite das inscrições deve ser maior ou igual à data de início das inscrições')
+            # Em caso de alteração do limite de inscrições, a nova data não pode estar no passado
+            if self.instance and self.instance.pk and self.instance.passivel_de_estender_inscricoes():
+                current_tz = timezone.get_current_timezone()
+                now = timezone.now().astimezone(current_tz)
+                if val:
+                    if val < now:
+                        raise forms.ValidationError(u'A data limite de inscrições deve ser maior ou igual a hoje')
+                    elif val < self.instance.limite_inscricoes and self.instance.passivel_de_estender_inscricoes():
+                        raise forms.ValidationError(u'Em respeito aos voluntários que já viram o anúncio porém ainda não se inscreveram, a data limite de inscrições não pode ser antecipada')
+        return val
+
+    def clean_previsao_resultado(self):
+        # Garante que a previsão de resultado, quando definida, seja sempre maior ou igual ao início e ao limite
+        val = self.cleaned_data['previsao_resultado']
+        if val:
+            # Se o campo estiver desabilitado, não haverá valor em cleaned_data, portanto podemos pegar direto do processo
+            inicio_inscricoes = self.cleaned_data.get('inicio_inscricoes', None)
+            if inicio_inscricoes is None:
+                inicio_inscricoes = self.instance.inicio_inscricoes
+
+            if val < inicio_inscricoes:
+                raise forms.ValidationError(u'A data da previsão do resultado deve ser maior ou igual à data de início das inscrições')
+
+            # O campo limite não é obrigatório
+            limite_inscricoes = self.cleaned_data.get('limite_inscricoes', None)
+            if limite_inscricoes:
+                if val < self.cleaned_data['limite_inscricoes']:
+                    raise forms.ValidationError(u'A data da previsão do resultado deve ser maior ou igual à data limite das inscrições')
+
+            # Em caso de alteração da previsão do resultado, a nova data não pode estar no passado
+            if self.instance and self.instance.pk and self.instance.passivel_de_estender_inscricoes():
+                current_tz = timezone.get_current_timezone()
+                now = timezone.now().astimezone(current_tz)
+                if val and self.instance.previsao_resultado > val.date() and val < now.date():
+                    raise forms.ValidationError(u'A data de previsão do resultado deve ser maior ou igual a data de hoje')
+
+        return val

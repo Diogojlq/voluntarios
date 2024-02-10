@@ -77,6 +77,9 @@ urlpatterns = [
 
     re_path(r'^entidade/(?P<id_entidade>\d+)/termos/novo/?$', views.novo_termo_de_adesao, name='novo_termo_de_adesao'),
     re_path(r'^entidade/(?P<id_entidade>\d+)/termos/?$', views.termos_de_adesao_de_entidade, name='termos_de_adesao_de_entidade'),
+    re_path(r'^entidades$', views.lista_entidades_vinculadas, name='lista_entidades_vinculadas'),
+    re_path(r'^entidade/(?P<id_entidade>\d+)$', views.index_entidade, name='index_entidade'),
+
     re_path(r'^termo/(?P<slug_termo>[\w-]+)/enviar$', views.enviar_termo_de_adesao, name='enviar_termo_de_adesao'),
     re_path(r'^termo/(?P<slug_termo>[\w-]+)/cancelar$', views.cancelar_termo_de_adesao, name='cancelar_termo_de_adesao'),
     re_path(r'^termo/(?P<slug_termo>[\w-]+)/rescindir$', views.rescindir_termo_de_adesao, name='rescindir_termo_de_adesao'),
@@ -162,6 +165,9 @@ urlpatterns = [
     re_path(r'^painel/entidades/problemacnpj$', views.exibe_entidades_com_problema_na_receita, name='exibe_entidades_com_problema_na_receita'),
     re_path(r'^painel/entidades/onboarding/?$', views.onboarding_entidades, name='onboarding_entidades'),
     re_path(r'^painel/entidades/onboarding/(?P<id_entidade>\d+)/?$', views.onboarding_entidade, name='onboarding_entidade'),
+    re_path(r'^painel/processos$', views.revisao_processos_seletivos, name='revisao_processos_seletivos'),
+    re_path(r'^painel/processos/(?P<codigo_processo>[\d-]+)$', views.revisao_processo_seletivo, name='revisao_processo_seletivo'),
+    re_path(r'^painel/processos/monitoramento$', views.monitoramento_processos_seletivos, name='monitoramento_processos_seletivos'),
 
     # Blog
     path('blog/<slug:slug>', views.PostagemNoBlog.as_view(), name='postagem_blog'),
@@ -176,17 +182,19 @@ urlpatterns = [
 
     path('entidades/favoritas/', views.entidades_favoritas, name="entidades_favoritas"),
 
-    re_path(r'^entidade/(?P<id_entidade>\d+)/processos/?$', views.processos_seletivos_entidade, name='processos_seletivos_entidade'),
+    # Processos seletivos
+    re_path(r'^entidade/(?P<id_entidade>\d+)/selecao/?$', views.processos_seletivos_entidade, name='processos_seletivos_entidade'),
 
-    re_path(r'^voluntario/processos/?$', views.lista_processos_voluntario, name='lista_processos_voluntario'),
+    re_path(r'^entidade/(?P<id_entidade>\d+)/selecao/nova/?$', views.novo_processo_seletivo, name='novo_processo_seletivo'),
+    re_path(r'^entidade/(?P<id_entidade>\d+)/selecao/(?P<codigo_processo>[\d-]+)/inscricoes$', views.inscricoes_processo_seletivo, name='inscricoes_processo_seletivo'),
+    re_path(r'^entidade/(?P<id_entidade>\d+)/selecao/(?P<codigo_processo>[\d-]+)/?$', views.editar_processo_seletivo, name='editar_processo_seletivo'),
 
-    re_path(r'^processos$', views.lista_processos_seletivos, name='lista_processos_seletivos'),
+    re_path(r'^voluntario/inscricoes/?$', views.processos_seletivos_voluntario, name='processos_seletivos_voluntario'),
 
-    re_path(r'^entidade/(?P<id_entidade>\d+)/processos-abertos/?$', views.lista_processos_entidade, name='lista_processos_entidade'),
-
-    re_path(r'^entidade/(?P<id_entidade>\d+)/processos/novo/?$', views.novo_processo_seletivo, name='novo_processo_seletivo'),
-
-    re_path(r'^entidade/(?P<id_entidade>\d+)/processos/novo/?$', views.novo_processo_seletivo, name='novo_processo_seletivo')
+    re_path(r'^vaga/busca$', views.busca_vagas, name='busca_vagas'),
+    re_path(r'^vaga/(?P<codigo_processo>[\d-]+)/inscricao$', views.inscricao_processo_seletivo, name='inscricao_processo_seletivo'),
+    re_path(r'^vaga/(?P<codigo_processo>[\d-]+)/?$', views.exibe_processo_seletivo, name='exibe_processo_seletivo'),
+    re_path(r'^classificar_inscricao$', views.classificar_inscricao, name='classificar_inscricao'),
 
 ]
 

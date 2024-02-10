@@ -16,6 +16,7 @@ from django.core.exceptions import ValidationError, SuspiciousOperation, Permiss
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.core import mail
 from django.core.validators import URLValidator
+from django.core.signing import SignatureExpired
 from django.db import transaction
 from django.db.models import Q, F, Count, Avg, Max, Min
 from django.db.models.functions import TruncMonth, TruncWeek
@@ -34,11 +35,11 @@ from django.utils import timezone
 from django.utils.http import urlencode
 from django.apps import apps
 
-from .models import Voluntario, AreaTrabalho, AreaAtuacao, Entidade, VinculoEntidade, Necessidade, AreaInteresse, Telefone, Email, RemocaoUsuario, AtividadeAdmin, Usuario, ForcaTarefa, Conteudo, AcessoAConteudo, FraseMotivacional, NecessidadeArtigo, TipoArtigo, AnotacaoEntidade, Funcao, UFS, TermoAdesao, PostagemBlog, Cidade, Estado, EntidadeFavorita, ProcessoSeletivo
+from .models import Voluntario, AreaTrabalho, AreaAtuacao, Entidade, VinculoEntidade, Necessidade, AreaInteresse, Telefone, Email, RemocaoUsuario, AtividadeAdmin, Usuario, ForcaTarefa, Conteudo, AcessoAConteudo, FraseMotivacional, NecessidadeArtigo, TipoArtigo, AnotacaoEntidade, Funcao, UFS, TermoAdesao, PostagemBlog, Cidade, Estado, EntidadeFavorita, StatusProcessoSeletivo, ProcessoSeletivo, ParticipacaoEmProcessoSeletivo, StatusParticipacaoEmProcessoSeletivo, MODO_TRABALHO, AreaTrabalhoEmProcessoSeletivo
 
 from allauth.account.models import EmailAddress
 
-from .forms import FormVoluntario, FormEntidade, FormCriarTermoAdesao, FormAssinarTermoAdesaoVol, FormAreaInteresse, FormTelefone, FormEmail, FormOnboarding, FormProcessoSeletivo
+from .forms import FormVoluntario, FormEntidade, FormCriarTermoAdesao, FormAssinarTermoAdesaoVol, FormAreaInteresse, FormTelefone, FormEmail, FormOnboarding, FormProcessoSeletivo, FormAreaTrabalho
 from .auth import ChangeUserProfileForm
 
 from .utils import notifica_aprovacao_voluntario
@@ -316,12 +317,15 @@ def cadastro_voluntario(request, msg=None):
                             messages.warning(request, u'Ops, salvamos seu perfil de voluntária(o), mas não conseguimos identificar o termo de adesão. Por favor, clique novamente no link fornecido por e-mail e caso o problema persista entre em contato conosco.')
                             return mensagem(request, u'Cadastro de Voluntário')
                     # Redireciona para página de exibição de mensagem
-                    msg = u'Obrigado! '
-                    if voluntario.invisivel:
-                        msg = msg + u'Seu cadastro passará por uma validação, mas você já pode usufruir de várias funcionalidades no site, como por exemplo'
+                    msg = u'Gravação feita com sucesso! '
+                    if request.user.link and 'vaga_' in request.user.link:
+                        msg = msg + u'Seus dados passarão por uma validação que normalmente leva 1 dia útil. Enviaremos uma notificação por e-mail assim que houver a aprovação, e logo em seguida você poderá se inscrever nas vagas disponíveis.'
                     else:
-                        msg = msg + u'Assim que o seu cadastro for validado ele estará disponível para as entidades. Enquanto isso, você já pode'
-                    msg = msg + u' procurar por entidades <a href="' + reverse('mapa_entidades') + '">próximas a você</a> ou que atendam a <a href="' + reverse('busca_entidades') + '">outros critérios de busca</a>.'
+                        if voluntario.invisivel:
+                            msg = msg + u'Seu cadastro passará por uma validação, mas você já pode usufruir de várias funcionalidades no site, como por exemplo'
+                        else:
+                            msg = msg + u'Assim que seu cadastro for validado, ele estará disponível para as entidades e você também poderá se inscrever em vagas de trabalho voluntário disponíveis. Enquanto isso, você já pode'
+                        msg = msg + u' procurar por entidades <a href="' + reverse('mapa_entidades') + '">próximas a você</a> ou que atendam a <a href="' + reverse('busca_entidades') + '">outros critérios de busca</a>.'
                     messages.info(request, msg)
                     return mensagem(request, u'Cadastro de Voluntário')
                 messages.info(request, u'Alterações gravadas com sucesso!')
@@ -525,6 +529,30 @@ def lista_entidades_vinculadas(request):
     '''Lista entidades gerenciadas pelo usuário'''
     context = {'entidades': request.user.entidades()}
     template = loader.get_template('vol/lista_entidades.html')
+    return HttpResponse(template.render(context, request))
+
+@login_required
+def index_entidade(request, id_entidade):
+    '''Página principal de gerenciamento de uma entidade '''
+    try:
+        entidade = Entidade.objects.get(pk=id_entidade)
+    except Entidade.DoesNotExist:
+        raise Http404
+
+    # Garante que apenas usuários vinculados à entidade vejam e emitam termos de adesão
+    if int(id_entidade) not in request.user.entidades().values_list('pk', flat=True):
+        raise PermissionDenied
+
+    processos = []
+
+    if entidade.aprovado:
+
+        processos = ProcessoSeletivo.objects.filter(entidade=entidade)
+
+    context = {'entidade': entidade,
+               'processos': processos}
+    
+    template = loader.get_template('vol/index_entidade.html')
     return HttpResponse(template.render(context, request))
 
 @login_required
@@ -1189,7 +1217,11 @@ def assinatura_vol_termo_de_adesao(request):
         if 'h' not in request.POST:
             return HttpResponseBadRequest('Ausência do parâmetro h')
         hmac_key = request.POST['h']
-    termo = TermoAdesao.objects.from_hmac_key(hmac_key)
+    try:
+        termo = TermoAdesao.objects.from_hmac_key(hmac_key)
+    except SignatureExpired:
+        messages.error(request, u'O prazo para confirmar este termo de adesão expirou. Favor solicitar a emissão de novo termo junto à entidade emissora.')
+        return mensagem(request, u'Assinatura de termo de adesão')
     if termo is None:
         messages.error(request, u'Não foi possível localizar este termo de adesão. Certifique-se de ter usado corretamente o link fornecido na mensagem. Na dúvida, copie o link manualmente e cole no campo de endereço do seu navegador. Caso você tenha recebido a notificação há muito tempo, pode ser também que a entidade tenha cancelado o termo de adesão, portanto também vale a pena confirmar com a entidade se o termo continua disponível, ou se é necessário emitir um novo termo. Se precisar de ajuda, entre em contato conosco.')
         return mensagem(request, u'Assinatura de termo de adesão')
@@ -1438,9 +1470,14 @@ def exibe_entidade(request, id_entidade):
     except Entidade.DoesNotExist:
         #raise SuspiciousOperation('Entidade inexistente')
         raise Http404
+
     entidade.hit()
+
+    processos_abertos = ProcessoSeletivo.objects.filter(entidade_id=entidade, status=StatusProcessoSeletivo.ABERTO_A_INSCRICOES).order_by('titulo')
+    
     dois_meses_atras = timezone.now() - datetime.timedelta(days=60)
     necessidades = entidade.necessidade_set.filter(data_solicitacao__gt=dois_meses_atras).order_by('-data_solicitacao')
+
     now = datetime.datetime.now()
     favorita = False
     if request.user.is_authenticated and request.user.is_voluntario:
@@ -1449,8 +1486,10 @@ def exibe_entidade(request, id_entidade):
             favorita = True
         except EntidadeFavorita.DoesNotExist:
             pass
+
     context = {'entidade': entidade,
                'agora': now,
+               'processos_abertos': processos_abertos,
                'necessidades': necessidades,
                'favorita': favorita}
     template = loader.get_template('vol/exibe_entidade.html')
@@ -1618,7 +1657,7 @@ def exibir_charada(request):
     s = 'Fr pubirffr cnynien, rz qvn qr fby avathrz snynevn!'
     if settings.DEBUG:
         cod = "".join([d.get(c, c) for c in s])
-        return HttpResponse(cod + '<small> (copie o texto ao lado e cole na <a href="mailto:contato' + '@' + 'voluntarios.com.br?subject=Ticket%20para%20a%20equipe%20de%20TI">seguinte mensagem</a>)</small>')
+        return HttpResponse(cod + '<small> (copie o texto ao lado e cole na <a href="mailto:tecno' + '@' + 'voluntarios.com.br?subject=Ticket%20para%20a%20equipe%20de%20TI">seguinte mensagem</a>)</small>')
     return redirect('/')
 
 @login_required
@@ -1630,15 +1669,33 @@ def redirect_login(request):
             # Se já é voluntário, busca entidades
             return redirect(reverse('busca_entidades'))
         # Caso contrário exibe página de cadastro
-        return cadastro_voluntario(request, msg=u'Para finalizar o cadatro de voluntário, complete o formulário abaixo:')
+        return cadastro_voluntario(request, msg=u'Para finalizar o cadastro de voluntário, complete o formulário abaixo:')
     elif request.user.link == 'entidade_nova':
         if request.user.is_voluntario:
             # Existem casos de voluntários que se cadastram pelo caminho de entidades.
             # Nestes casos, ao cadastrar um perfil de voluntário, melhor parar de redirecionar
             # para a página de gerenciamento de entidades, redirecionando para busca de entidades
             return redirect(reverse('busca_entidades'))
-        # Exibe página de cadastro de entidade
-        return cadastro_entidade(request)
+        else:
+            # Independente do usuário possuir entidade cadastrada, redireciona para página
+            # de gerenciamento de entidades, onde pode-se atualizar ou cadastrar entidades
+            return cadastro_entidade(request)
+    elif request.user.link and 'vaga_' in request.user.link:
+        if not request.user.is_voluntario:
+            # Se ainda não for voluntário, exibe página de cadastro
+            # obs: precisamos verificar isso aqui, pois a query mais abaixo só funciona para voluntários
+            return cadastro_voluntario(request, msg=u'Para finalizar o cadastro de voluntário e poder se inscrever em vagas disponíveis após aprovação do cadastro (normalmente leva 1 dia útil), complete o formulário abaixo:')
+        codigo_processo = request.user.codigo_de_processo_seletivo_de_entrada()
+        try:
+            processo = ProcessoSeletivo.objects.get(codigo=codigo_processo)
+            if processo.inscricoes_abertas() and ParticipacaoEmProcessoSeletivo.objects.filter(processo_seletivo=processo, voluntario=request.user.voluntario).count() == 0:
+                # Se a seleção ainda está aberta e o voluntário não se inscreveu,
+                # vai para a página do processo seletivo, com todas as verificações que são feitas lá
+                return exibe_processo_seletivo(request, codigo_processo)
+        except ProcessoSeletivo.DoesNotExist:
+            pass
+        # Utiliza busca de vagas como página default
+        return redirect(reverse('busca_vagas'))
 
     if 'link' in request.session:
         if request.session['link'] == 'entidade_nova':
@@ -2008,6 +2065,12 @@ def painel(request):
     # Total de e-mails de entidades descobertos pelo usuário
     total_emails_descobertos = Email.objects.filter(entidade__isnull=False, entidade__aprovado=True, resp_cadastro=request.user).count()
 
+    # Total de processos seletivos aguardando revisão
+    total_procs_revisao = ProcessoSeletivo.objects.filter(status=StatusProcessoSeletivo.AGUARDANDO_APROVACAO).count()
+
+    # Total de processos seletivos
+    total_procs = ProcessoSeletivo.objects.filter().count()
+
     # Forças tarefas
     tarefas_ativas = ForcaTarefa.objects.filter(visivel=True).order_by('data_cadastro')
 
@@ -2069,8 +2132,6 @@ def painel(request):
         motivo = type(e).__name__ + str(e.args)
         notify_support(u'Erro na api do github', motivo, request)
     
-    processos_para_revisao = ProcessoSeletivo.objects.filter(status=20)
-
     context = {'total_vol': total_vol,
                'tempo_vol': tempo_vol,
                'tempo_vol_max': tempo_vol_max,
@@ -2086,11 +2147,93 @@ def painel(request):
                'total_problemas_cnpj': total_problemas_cnpj,
                'total_ents_pessoal': total_ents_pessoal,
                'total_emails_descobertos': total_emails_descobertos,
+               'total_procs_revisao': total_procs_revisao,
+               'total_procs': total_procs,
                'tarefas': tarefas,
                'num_tickets': num_tickets,
-               'ultimos_commits': ultimos_commits,
-               'processos_para_revisao': processos_para_revisao }
+               'ultimos_commits': ultimos_commits }
     template = loader.get_template('vol/painel.html')
+    return HttpResponse(template.render(context, request))
+
+@login_required
+@staff_member_required
+def revisao_processos_seletivos(request):
+    '''Página para revisar novos processos seletivos'''
+
+    processos = ProcessoSeletivo.objects.filter(status=StatusProcessoSeletivo.AGUARDANDO_APROVACAO).order_by('inicio_inscricoes')
+
+    if len(processos) == 0:
+        # Um usuário só entrará aqui nessa condição se tiver armazenado o link da página (pouco provável)
+        # ou se tiver acabado de aprovar o último processo seletivo, situação em que faz mais sentido
+        # já redirecionar para o painel de controle.
+        return painel(request)
+
+    context = {'processos': processos}
+
+    template = loader.get_template('vol/revisao_processos_seletivos.html')
+    
+    return HttpResponse(template.render(context, request))
+
+@login_required
+@staff_member_required
+def revisao_processo_seletivo(request, codigo_processo):
+    '''Página para revisar um processo seletivo'''
+    metodos = ['GET', 'POST']
+    if request.method not in (metodos):
+        return HttpResponseNotAllowed(metodos)
+
+    try:
+
+        if request.method == 'POST':
+            if 'aprovar' in request.POST:
+                qs = ProcessoSeletivo.objects.select_for_update().filter(codigo=codigo_processo, status=StatusProcessoSeletivo.AGUARDANDO_APROVACAO)
+                with transaction.atomic():
+                    for processo in qs:
+                        if processo.inscricoes_encerradas():
+                            messages.error(request, u'As inscrições para este processo já estão encerradas! Entre em contato com a entidade para atualizar as datas.')
+                        else:
+                            processo.aprovar(by=request.user)
+                            processo.save()
+                            return revisao_processos_seletivos(request)
+            else:
+                return redirect(reverse('painel'))
+        else:
+            processo = ProcessoSeletivo.objects.get(codigo=codigo_processo, status=StatusProcessoSeletivo.AGUARDANDO_APROVACAO)
+                
+    except ProcessoSeletivo.DoesNotExist:
+        messages.error(request, u'Este processo não existe ou já foi revisado...')
+        return redirect(reverse('painel'))
+
+    # Em princípio, vamos deixar tudo desabilitado. Se houver algum problema será preciso
+    # entrar em contato com a entidade para que ela faça a alteração. Futuramente podemos pensar
+    # em permitir alterações na revisão ou então em criar um status novo "aguardando revisão", mas
+    # antes de complicar vamos tentar a solução mais simples.
+    form = FormProcessoSeletivo(instance=processo, disabled=True)
+
+    FormSetAreaTrabalho = formset_factory(FormAreaTrabalho, formset=BaseFormSet, extra=0, min_num=1, validate_min=True, can_delete=False)
+    area_trabalho_formset = FormSetAreaTrabalho(initial=AreaTrabalhoEmProcessoSeletivo.objects.filter(processo_seletivo=processo).order_by('area_trabalho__nome').values('area_trabalho'))
+    for subform in area_trabalho_formset:
+        subform.disable()
+        
+    context = {'form': form,
+               'area_trabalho_formset': area_trabalho_formset,
+               'processo': processo}
+
+    template = loader.get_template('vol/revisao_processo_seletivo.html')
+    
+    return HttpResponse(template.render(context, request))
+
+@login_required
+@staff_member_required
+def monitoramento_processos_seletivos(request):
+    '''Página para monitorar todos os processos seletivos cadastrados'''
+
+    processos = ProcessoSeletivo.objects.filter().order_by('-cadastrado_em')
+
+    context = {'processos': processos}
+
+    template = loader.get_template('vol/monitoramento_processos_seletivos.html')
+    
     return HttpResponse(template.render(context, request))
 
 @login_required
@@ -2595,6 +2738,7 @@ class PostagemNoBlog(generic.DetailView):
     template_name = 'vol/postagem_blog.html'
 
 def retorna_cidades(request):
+    '''Retorna lista de cidades (nomes) em JSON do estado passado como parâmetro (sigla do estado)'''
     try:
         estado = request.GET.get('estado')
         UF = Estado.objects.get(sigla=estado)
@@ -2651,6 +2795,7 @@ def numeros(request):
 
 @login_required
 def processos_seletivos_entidade(request, id_entidade):
+    '''Página listando processos seletivos na interface da entidade'''
     try:
         entidade = Entidade.objects.get(pk=id_entidade)
     except Entidade.DoesNotExist:
@@ -2659,43 +2804,138 @@ def processos_seletivos_entidade(request, id_entidade):
     if int(id_entidade) not in request.user.entidades().values_list('pk', flat=True):
         raise PermissionDenied
 
-    processos = ProcessoSeletivo.objects.filter(entidade_id=id_entidade)
+    processos = ProcessoSeletivo.objects.filter(entidade_id=id_entidade).annotate(num_inscricoes=Count('participacaoemprocessoseletivo'))
 
-    context = {'entidade': entidade,
+    context = {'entidade': entidade, # este parâmetro é importante, pois é usado no template pai
                'processos': processos}
-    template = loader.get_template('vol/processos_seletivos_da_entidade.html')
+    template = loader.get_template('vol/processos_seletivos_entidade.html')
     return HttpResponse(template.render(context, request))
 
 @login_required
-def lista_processos_voluntario(request):
-    # try:
-    #     processos = Processos.objects.get(id_voluntario=request.user.voluntario)
-    # except Voluntario.DoesNotExist:
-    #     raise PermissionDenied
-    processos = ["placehold"]
-    context = { 'processos' : processos }
-    template = loader.get_template('vol/lista_processos_voluntario.html')
+def processos_seletivos_voluntario(request):
+    '''Página listando processos seletivos na interface do voluntário'''
+    inscricoes = ParticipacaoEmProcessoSeletivo.objects.none()
+    if request.user.is_voluntario:
+        inscricoes = ParticipacaoEmProcessoSeletivo.objects.select_related('processo_seletivo', 'processo_seletivo__entidade').filter(voluntario=request.user.voluntario)
+    context = {'inscricoes': inscricoes}
+    template = loader.get_template('vol/processos_seletivos_voluntario.html')
     return HttpResponse(template.render(context,request))
 
-def lista_processos_seletivos(request):
-    processos_abertos = ["placehold"]
-    context = { 'processos_abertos' : processos_abertos }
-    template = loader.get_template('vol/lista_processos_seletivos.html')
-    return HttpResponse(template.render(context,request))
+def busca_vagas(request):
+    '''Página para busca de vagas'''
+    metodos = ['GET']
+    if request.method not in (metodos):
+        return HttpResponseNotAllowed(metodos)
 
-def lista_processos_entidade(request, id_entidade):
-    try:
-        entidade = Entidade.objects.get(pk=id_entidade)
-    except Entidade.DoesNotExist:
-        raise Http404
-    processos = ["placehold"]
-    context = { 'processos' : processos }
-    template = loader.get_template('vol/lista_processos_entidade.html')
-    return HttpResponse(template.render(context,request))
+    profissoes = AreaTrabalho.objects.all().order_by('nome')
+    causas = AreaAtuacao.objects.all().order_by('indice')
+    estados = Estado.objects.all().order_by('nome')
+    vagas = None
+    get_params = ''
+    pagina_inicial = pagina_final = None
+
+    if 'Envia' in request.GET:
+
+        # Apenas voluntários cujo cadastro já tenha sido revisado e aprovado, e sejam visíveis nas buscas
+        vagas = ProcessoSeletivo.objects.select_related('entidade', 'entidade__area_atuacao', 'estado', 'cidade').filter(status=StatusProcessoSeletivo.ABERTO_A_INSCRICOES)
+
+        # Filtro por modo de trabalho
+        modo_trabalho = request.GET.get('modo_trabalho')
+        if modo_trabalho:
+            vagas = vagas.filter(modo_trabalho=modo_trabalho)
+
+        # Filtro por estado
+        estado = request.GET.get('estado')
+        if estado:
+            vagas = vagas.filter(estado__sigla=estado)
+            # Filtro por cidade
+            cidade = request.GET.get('cidade')
+            if cidade:
+                vagas = vagas.filter(cidade__nome=cidade, cidade__uf=estado)
+
+        # Filtro por causa
+        fasocial = request.GET.get('fasocial')
+        if fasocial.isdigit() and fasocial not in [0, '0']:
+            try:
+                causa = AreaAtuacao.objects.get(pk=fasocial)
+                if '.' in causa.indice:
+                    vagas = vagas.filter(entidade__area_atuacao=fasocial)
+                else:
+                    vagas = vagas.filter(Q(entidade__area_atuacao=fasocial) | Q(entidade__area_atuacao__indice__startswith=str(causa.indice)+'.'))
+            except AreaAtuacao.DoesNotExist:
+                raise SuspiciousOperation(u'Causa inexistente')
+
+        # Filtro por profissão
+        fareatrabalho = request.GET.get('fareatrabalho')
+        if fareatrabalho.isdigit() and fareatrabalho not in [0, '0']:
+            vagas = vagas.filter(areatrabalhoemprocessoseletivo__area_trabalho=fareatrabalho)
+
+        # Filtro por palavras-chave
+        fpalavras = request.GET.get('fpalavras')
+        if fpalavras is not None and len(fpalavras) > 0:
+            # Aqui utilizamos outro queryset para evitar duplicidade de registros devido ao uso de distinct com order_by mais pra frente 
+            ids = ProcessoSeletivo.objects.annotate(search=SearchVector('titulo', 'atividades', 'requisitos')).filter(search=fpalavras).distinct('pk')
+            vagas = vagas.filter(pk__in=ids)
+
+        # Já inclui áreas de interesse para otimizar
+        # obs: essa abordagem não funciona junto com paginação! (django 1.10.7)
+        #vagas = vagas.prefetch_related('entidade__area_atuacao')
+
+        # Ordem dos resultados
+        ordem = request.GET.get('ordem', '')
+        if ordem == 'titulo':
+            vagas = vagas.order_by('titulo')
+        elif ordem == 'entidade':
+            vagas = vagas.order_by('entidade__razao_social')
+        else: # início das inscrições
+            vagas = vagas.order_by('-inicio_inscricoes')
+
+        # Paginação
+        paginador = Paginator(vagas, 20) # 20 vagas por página
+        pagina = request.GET.get('page')
+        try:
+            vagas = paginador.page(pagina)
+        except PageNotAnInteger:
+            # Se a página não é um número inteiro, exibe a primeira
+            vagas = paginador.page(1)
+        except EmptyPage:
+            # Se a página está fora dos limites (ex 9999), exibe a última
+            vagas = paginador.page(paginador.num_pages)
+        pagina_atual = vagas.number
+        max_links_visiveis = 10
+        intervalo = 10/2
+        pagina_inicial = pagina_atual - intervalo
+        pagina_final = pagina_atual + intervalo -1
+        if pagina_inicial <= 0:
+            pagina_final = pagina_final - pagina_inicial + 1
+            pagina_inicial = 1
+        if pagina_final > paginador.num_pages:
+            pagina_final = paginador.num_pages
+            pagina_inicial = max(pagina_final - (2*intervalo) + 1, 1)
+        # Parâmetros GET
+        for k, v in request.GET.items():
+            if k in ('page', 'csrfmiddlewaretoken'):
+                continue
+            if len(get_params) > 0:
+                get_params += '&'
+            get_params += k + '=' + v
+
+    context = {'modos_de_trabalho': MODO_TRABALHO,
+               'profissoes': profissoes,
+               'causas': causas,
+               'estados': estados,
+               'vagas': vagas,
+               'get_params': get_params,
+               'pagina_inicial': pagina_inicial,
+               'pagina_final': pagina_final}
+    
+    template = loader.get_template('vol/busca_vagas.html')
+    return HttpResponse(template.render(context, request))
 
 @login_required
 @transaction.atomic
 def novo_processo_seletivo(request, id_entidade):
+    '''Cadastro de novo processo seletivo via interface da entidade'''
     try:
         entidade = Entidade.objects.get(pk=id_entidade)
     except Entidade.DoesNotExist:
@@ -2703,41 +2943,397 @@ def novo_processo_seletivo(request, id_entidade):
     if int(id_entidade) not in request.user.entidades().values_list('pk', flat=True):
         raise PermissionDenied
 
+    FormSetAreaTrabalho = formset_factory(FormAreaTrabalho, formset=BaseFormSet, extra=1, max_num=10, min_num=1, validate_min=True, can_delete=True)
+
     if request.method == 'POST':
 
         form = FormProcessoSeletivo(request.POST)
+
+        area_trabalho_formset = FormSetAreaTrabalho(request.POST, request.FILES)
         
-        form.initial['entidade'] = entidade
-        form.initial['cadastrado_por'] = request.user
-        form.initial['status'] = 20
-        
-        if form.is_valid():
+        if form.is_valid() and area_trabalho_formset.is_valid():
+
+            status = StatusProcessoSeletivo.EM_ELABORACAO
+
+            if 'solicitar_aprovacao' in request.POST:
+                status = StatusProcessoSeletivo.AGUARDANDO_APROVACAO
             
-            form.entidade = entidade
-            form.cadastrado_por = request.user
-            form.status = 20
-
-            processo_seletivo = ProcessoSeletivo(titulo=form.titulo,
-                             nome_entidade=form.razao_social,
-                             resumo_entidade=form.resumo_entidade,
-                             modo_trabalho=form.modo_trabalho,
-                             estado=form.estado,
-                             cidade=form.cidade,
-                             atividades=form.atividades,
-                             carga_horaria=form.carga_horaria,
-                             requisitos=form.requisitos,
-                             inicio_inscricoes=form.inicio_inscricoes,
-                             limite_inscricoes=form.limite_inscricoes,
-                             previsao_resultado=form.previsao_resultado)
+            processo_seletivo = ProcessoSeletivo(entidade=entidade,
+                                                 cadastrado_por=request.user,
+                                                 status=status,
+                                                 titulo=form.cleaned_data['titulo'],
+                                                 resumo_entidade=form.cleaned_data['resumo_entidade'],
+                                                 modo_trabalho=form.cleaned_data['modo_trabalho'],
+                                                 estado=form.cleaned_data['estado'],
+                                                 cidade=form.cleaned_data['cidade'],
+                                                 atividades=form.cleaned_data['atividades'],
+                                                 carga_horaria=form.cleaned_data['carga_horaria'],
+                                                 requisitos=form.cleaned_data['requisitos'],
+                                                 inicio_inscricoes=form.cleaned_data['inicio_inscricoes'],
+                                                 limite_inscricoes=form.cleaned_data['limite_inscricoes'],
+                                                 previsao_resultado=form.cleaned_data['previsao_resultado'])
             processo_seletivo.save()
-            return redirect(reverse('lista_processos_entidade'))
+
+            # áreas de trabalho
+            areas_incluidas = []
+            for area_trabalho_form in area_trabalho_formset:
+                area_trabalho = area_trabalho_form.cleaned_data.get('area_trabalho')
+                if area_trabalho:
+                    if area_trabalho.id not in areas_incluidas:
+                        areas_incluidas.append(area_trabalho.id)
+                        area = AreaTrabalhoEmProcessoSeletivo(area_trabalho=area_trabalho,
+                                                              processo_seletivo=processo_seletivo)
+                        area.save()
+                    else:
+                        # Ignora duplicidades
+                        pass
+                else:
+                    # Ignora combos vazios
+                    pass
+            
+            return redirect(reverse('processos_seletivos_entidade', kwargs={'id_entidade': entidade.id}))
     else:
+
+        # Copia alguns dados do último processo cadastrado para agilizar
+        initial = {}
+        ultimo_processo = ProcessoSeletivo.objects.all().last()
+        if ultimo_processo is not None:
+            initial['resumo_entidade'] = ultimo_processo.resumo_entidade
+            initial['modo_trabalho'] = ultimo_processo.modo_trabalho
+            initial['estado'] = ultimo_processo.estado
+            initial['cidade'] = ultimo_processo.cidade
         
-        form = FormProcessoSeletivo()
+        form = FormProcessoSeletivo(initial=initial)
 
-    context = { 'form' : form,
-                'entidade': entidade }
-    template = loader.get_template('vol/formulario_novo_processo.html')
+        area_trabalho_formset = FormSetAreaTrabalho()
+
+    context = {'form': form,
+               'area_trabalho_formset': area_trabalho_formset,
+               'entidade': entidade}
+    template = loader.get_template('vol/formulario_processo_seletivo.html')
     
-    return HttpResponse(template.render(context,request))
+    return HttpResponse(template.render(context, request))
 
+@login_required
+@transaction.atomic
+def editar_processo_seletivo(request, id_entidade, codigo_processo):
+    '''Edição de processo seletivo via interface da entidade'''
+    try:
+        processo = ProcessoSeletivo.objects.get(codigo=codigo_processo)
+    except ProcessoSeletivo.DoesNotExist:
+        raise Http404
+    if int(processo.entidade_id) not in request.user.entidades().values_list('pk', flat=True):
+        raise PermissionDenied
+
+    num_inscricoes = processo.inscricoes().count()
+
+    FormSetAreaTrabalho = formset_factory(FormAreaTrabalho, formset=BaseFormSet, extra=0, max_num=10, min_num=1, validate_min=True, can_delete=True)
+
+    if request.method == 'POST':
+
+        if processo.editavel():
+
+            form = FormProcessoSeletivo(request.POST, instance=processo)
+            area_trabalho_formset = FormSetAreaTrabalho(request.POST, request.FILES)
+
+            areas_preexistentes = list(AreaTrabalhoEmProcessoSeletivo.objects.filter(processo_seletivo=processo).values_list('area_trabalho', flat=True))
+
+            if form.is_valid() and area_trabalho_formset.is_valid():
+
+                proc = form.save()
+
+                areas_incluidas = []
+                areas_selecionadas = []
+                for area_trabalho_form in area_trabalho_formset:
+                    area_trabalho = area_trabalho_form.cleaned_data.get('area_trabalho')
+                    if area_trabalho:
+                        areas_selecionadas.append(area_trabalho.id)
+                        if area_trabalho.id not in areas_preexistentes and area_trabalho.id not in areas_incluidas:
+                            areas_incluidas.append(area_trabalho.id)
+                            area = AreaTrabalhoEmProcessoSeletivo(area_trabalho=area_trabalho,
+                                                                  processo_seletivo=processo)
+                            area.save()
+                        else:
+                            # Ignora duplicidades e áreas já salvas
+                            pass
+                    else:
+                        # Ignora combos vazios
+                        pass
+                # Apaga áreas removidas
+                for area_preexistente in areas_preexistentes:
+                    if area_preexistente not in areas_selecionadas:
+                        try:
+                            r_area = AreaTrabalhoEmProcessoSeletivo.objects.get(area_trabalho=area_preexistente, processo_seletivo=processo)
+                            r_area.delete()
+                        except AreaTrabalhoEmProcessoSeletivo.DoesNotExist:
+                            pass
+
+                if 'solicitar_aprovacao' in request.POST:
+                    proc.solicitar_aprovacao(by=request.user)
+                    proc.save()
+                    return redirect(reverse('processos_seletivos_entidade', kwargs={'id_entidade': proc.entidade_id}))
+
+                messages.info(request, u'Alterações salvas com sucesso!')
+
+        else:
+
+            # Processo não é editável aqui
+            area_trabalho_formset = FormSetAreaTrabalho(initial=AreaTrabalhoEmProcessoSeletivo.objects.filter(processo_seletivo=processo).order_by('area_trabalho__nome').values('area_trabalho'))
+            for subform in area_trabalho_formset:
+                subform.disable()
+            
+            if processo.passivel_de_antecipar_inscricoes() or processo.passivel_de_estender_inscricoes():
+
+                # Faz uma cópia do processo, pois a chanada ao is_valid abaixo já
+                # irá alterar os dados da instância
+                processo_original = deepcopy(processo)
+
+                # Estrutura customizada de dados preenchendo campos desabilitados com conteúdo do registro
+                data = request.POST.dict()
+                data['titulo'] = processo.titulo
+                data['resumo_entidade'] = processo.resumo_entidade
+                data['modo_trabalho'] = str(processo.modo_trabalho)
+                data['estado'] = processo.estado
+                data['cidade'] = processo.cidade
+                data['atividades'] = processo.atividades
+                data['carga_horaria'] = processo.carga_horaria
+                data['requisitos'] = processo.requisitos
+                if not processo.passivel_de_antecipar_inscricoes():
+                    data['inicio_inscricoes'] = processo.inicio_inscricoes
+
+                form = FormProcessoSeletivo(data, instance=processo)
+
+                if form.is_valid(): # atenção, este método altera a instância do processo seletivo
+
+                    if processo_original.passivel_de_antecipar_inscricoes():
+
+                        if processo_original.inicio_inscricoes != processo.inicio_inscricoes:
+                            processo.save(update_fields=['inicio_inscricoes'])
+                            messages.info(request, u'Início de inscrições alterado com sucesso!')
+
+                            if processo.aguardando_publicacao() and processo.inscricoes_abertas():
+                                processo.publicar(by=request.user)
+                                processo.save()
+
+                    if processo_original.passivel_de_estender_inscricoes():
+
+                        update_fields = []
+
+                        if processo_original.limite_inscricoes != processo.limite_inscricoes:
+                            update_fields.append('limite_inscricoes')
+                        if processo_original.previsao_resultado != processo.previsao_resultado:
+                            update_fields.append('previsao_resultado')
+
+                        if update_fields: 
+                            processo.save(update_fields=update_fields)
+
+                        if 'limite_inscricoes' in update_fields:
+
+                            if processo.aguardando_selecao() and processo.inscricoes_abertas():
+                                obs = None
+                                if processo_original.limite_inscricoes:
+                                    limite_anterior = processo_original.limite_inscricoes.strftime('%d/%m/%Y %H:%M:%S')
+                                    obs = u'Limite anterior para inscrições: ' + limite_anterior
+                                processo.reabrir_inscricoes(by=request.user, description=obs)
+                                processo.save()
+                            messages.info(request, u'Limite de inscrições alterado com sucesso!')
+
+                    return redirect(reverse('processos_seletivos_entidade', kwargs={'id_entidade': processo.entidade_id}))
+    else:
+
+        form = FormProcessoSeletivo(instance=processo)
+
+        area_trabalho_formset = FormSetAreaTrabalho(initial=AreaTrabalhoEmProcessoSeletivo.objects.filter(processo_seletivo=processo).order_by('area_trabalho__nome').values('area_trabalho'))
+
+        if not processo.editavel():
+
+            for subform in area_trabalho_formset:
+                subform.disable()
+
+    context = {'form': form,
+               'area_trabalho_formset': area_trabalho_formset,
+               'entidade': processo.entidade, # este parâmetro é importante, pois é usado no template pai
+               'processo': processo,
+               'num_inscricoes': num_inscricoes}
+
+    template = loader.get_template('vol/formulario_processo_seletivo.html')
+    
+    return HttpResponse(template.render(context, request))
+
+@login_required
+@transaction.atomic
+def inscricoes_processo_seletivo(request, id_entidade, codigo_processo):
+    '''Visualização e gerenciamento das inscrições de um processo seletivo'''
+    try:
+        processo = ProcessoSeletivo.objects.select_related('entidade').get(codigo=codigo_processo)
+    except ProcessoSeletivo.DoesNotExist:
+        raise Http404
+    if int(processo.entidade_id) not in request.user.entidades().values_list('pk', flat=True):
+        raise PermissionDenied
+
+    if request.method == 'POST' and 'encerrar' in request.POST:
+        if processo.aguardando_selecao():
+            if (processo.inscricoes_encerradas() or processo.limite_inscricoes is None):
+                num_inscricoes_aguardando_selecao = processo.inscricoes(status=StatusParticipacaoEmProcessoSeletivo.AGUARDANDO_SELECAO).count()
+                if num_inscricoes_aguardando_selecao == 0:
+                    processo.concluir(by=request.user)
+                    processo.save()
+                    messages.info(request, u'Processo seletivo encerrado!')
+                    return redirect(reverse('processos_seletivos_entidade',
+                                            kwargs={'id_entidade': processo.entidade_id}))
+                else:
+                    messages.error(request, u'Ainda existem candidatos aguardando seleção.')
+            else:
+                messages.error(request, u'Só é possível encerrar um processo seletivo quando as inscrições estiverem encerradas ou quando não houver data limite para as inscrições.')
+        else:
+            messages.error(request, u'Só é possível encerrar um processo seletivo quando o mesmo estiver na situação "aguardando seleção".')
+            
+    inscricoes = processo.inscricoes()
+
+    context = {'entidade': processo.entidade, # este parâmetro é importante, pois é usado no template pai
+               'processo': processo,
+               'inscricoes': inscricoes}
+
+    template = loader.get_template('vol/inscricoes_processo_seletivo.html')
+    
+    return HttpResponse(template.render(context, request))
+
+def exibe_processo_seletivo(request, codigo_processo):
+    '''Página pública de processo seletivo'''
+    try:
+        processo = ProcessoSeletivo.objects.get(codigo=codigo_processo)
+    except ProcessoSeletivo.DoesNotExist:
+        raise Http404
+
+    inscricao = None
+
+    if request.user.is_authenticated and request.user.is_voluntario:
+
+        try:
+            inscricao = ParticipacaoEmProcessoSeletivo.objects.get(processo_seletivo=processo, voluntario=request.user.voluntario)
+        except ParticipacaoEmProcessoSeletivo.DoesNotExist:
+            pass
+
+    context = {'processo': processo,
+               'inscricao': inscricao}
+
+    template = loader.get_template('vol/exibe_processo_seletivo.html')
+    
+    return HttpResponse(template.render(context, request))
+
+@transaction.atomic
+def inscricao_processo_seletivo(request, codigo_processo):
+    '''Método para lidar com inscrição / desistência de processo seletivo'''
+
+    try:
+        processo = ProcessoSeletivo.objects.get(codigo=codigo_processo)
+    except ProcessoSeletivo.DoesNotExist:
+        messages.warning(request, u'Não encontramos a vaga especificada. Será que o código está correto? Em caso de dúvida, entre em <a href="mailto:' + settings.CONTACT_EMAIL + '">contato</a> conosco para verificarmos o que houve.')
+        # Redireciona para página de exibição de mensagem
+        return mensagem(request, u'Inscrição em vaga')
+
+    # Condições para inscrição:
+    if not request.user.is_authenticated:
+        # Indica que usuário quer se inscrever numa vaga e redireciona para o cadastro básico de usuário
+        request.session['link'] = 'vaga_' + codigo_processo
+        messages.info(request, u'<strong>Para se inscrever numa vaga, faça antes um cadastro de voluntário com a gente. Comece pelo cadastro de usuário preenchendo o formulário abaixo. Se já possuir cadastro, clique no link para fazer login.</strong>')
+        return redirect(reverse('account_signup'))
+    if not request.user.is_voluntario:
+        # Avisa que é preciso ter perfil cadastrado de voluntário para se inscrever
+        if request.user.link and 'vaga_' in request.user.link:
+            messages.info(request, u'<strong>Agora só falta preencher seu perfil de voluntário. Utilize o formulário abaixo e depois só aguarde a aprovação do cadastro. Assim que seu cadastro for aprovado, você vai receber uma notificação por e-mail.</strong>')
+        else:
+            messages.info(request, u'<strong>Para poder se inscrever numa vaga só falta preencher seu perfil de voluntário. Utilize o formulário abaixo e depois aguarde a aprovação do cadastro. Assim que seu cadastro for aprovado, você vai receber uma notificação por e-mail.</strong>')
+        # Redireciona para página de cadastro de perfil de voluntário
+        return redirect(reverse('cadastro_voluntario'))
+    if request.user.voluntario.aprovado is None:
+        # Avisa que é preciso aguardar a aprovação do cadastro
+        messages.info(request, u'<strong>Aguarde a aprovação do seu cadastro para fazer a inscrição. Normalmente isso leva 1 dia útil. Você receberá uma notificação por e-mail assim que seu cadastro for aprovado.</strong>')
+        return exibe_processo_seletivo(request, processo.codigo)
+    if request.user.voluntario.aprovado == False:
+        # Avisa que o cadastro não foi aprovado
+        messages.error(request, u'<strong>Seu cadastro de voluntário não foi aprovado. Entre em <a href="mailto:' + settings.CONTACT_EMAIL + '">contato</a></strong> conosco em caso de dúvidas.')
+        return exibe_processo_seletivo(request, processo.codigo)
+
+    if not processo.inscricoes_abertas():
+        messages.error(request, u'As inscrições para este processo seletivo já foram encerradas.')
+        return exibe_processo_seletivo(request, processo.codigo)
+
+    # Gerenciamento da inscrição
+    if request.method == 'POST':
+
+        inscricao = processo.busca_inscricao_de_voluntario(request.user.voluntario.pk)
+
+        if 'inscrever' in request.POST:
+
+            if inscricao:
+                if inscricao.desistiu():
+                    inscricao.reinscrever(by=request.user)
+                    inscricao.save()
+                    messages.info(request, u'Inscrição reativada com sucesso!')
+                else:
+                    messages.warning(request, u'Você já se inscreveu neste processo seletivo. Não há necesidade de se inscrever novamente.')
+            else:
+                inscricao = ParticipacaoEmProcessoSeletivo(processo_seletivo=processo, voluntario=request.user.voluntario)
+                inscricao.save()
+                messages.info(request, u'Inscrição realizada com sucesso! Aguarde as instruções do processo seletivo.')
+
+        elif 'desistir' in request.POST:
+
+            if inscricao:
+                if inscricao.passivel_de_desistencia():
+                    inscricao.desistir(by=request.user)
+                    inscricao.save()
+                    messages.info(request, u'Inscrição cancelada!')
+                else:
+                    messages.error(request, u'Não há como cancelar a inscrição nas condições em que este processo seletivo se encontra. Em caso de dúvida entre em contato conosco.')
+            else:
+                messages.error(request, u'Não faz sentido cancelar uma inscrição que sequer foi efetuada.')
+        else:
+            pass
+
+    return exibe_processo_seletivo(request, processo.codigo)
+
+@login_required
+@transaction.atomic
+def classificar_inscricao(request):
+    '''Classifica uma inscrição de processo seletivo.
+    Parâmetros POST:
+    id (id da inscrição),
+    value (status da inscrição: aguardando_selecao, selecionado, nao_selecionado)
+    OBS: também requer o header X-CSRFToken'''
+
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+
+    inscricao_id = request.POST.get('id')
+    value = request.POST.get('value')
+
+    if inscricao_id is None or value is None or value not in ('aguardando_selecao', 'selecionado', 'nao_selecionado') or not inscricao_id.isdigit():
+        return HttpResponseBadRequest('Parâmetros incorretos')
+
+    try:
+        inscricao = ParticipacaoEmProcessoSeletivo.objects.select_related('processo_seletivo', 'processo_seletivo__entidade').get(pk=inscricao_id)
+    except ParticipacaoEmProcessoSeletivo.DoesNotExist:
+        raise Http404
+
+    if int(inscricao.processo_seletivo.entidade_id) not in request.user.entidades().values_list('pk', flat=True):
+        raise PermissionDenied
+
+    if not inscricao.passivel_de_selecao():
+        raise PermissionDenied
+
+    if value == 'aguardando_selecao':
+        if inscricao.selecionado() or inscricao.nao_selecionado():
+            inscricao.desfazer_selecao(by=request.user)
+            inscricao.save()
+    elif value == 'selecionado':
+        if inscricao.aguardando_selecao() or inscricao.nao_selecionado():
+            inscricao.selecionar(by=request.user)
+            inscricao.save()
+    elif value == 'nao_selecionado':
+        if inscricao.aguardando_selecao() or inscricao.selecionado():
+            inscricao.rejeitar(by=request.user)
+            inscricao.save()
+
+    return HttpResponse(status=200)
